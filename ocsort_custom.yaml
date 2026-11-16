@@ -1,0 +1,23 @@
+# STARTING POINT untuk A/B testing OC-SORT vs ByteTrack, BUKAN nilai final.
+# Bandingkan hasilnya di klip loading-dengan-oklusi menggunakan video.py
+# --tracker sebelum dipakai di produksi.
+#
+# track_buffer DIUBAH DARI DEFAULT 30 frame (~1 detik @30fps -- terlalu
+# pendek utk oklusi loading yang bisa berlangsung puluhan detik) menjadi 450
+# frame (~15 detik @30fps). SESUAIKAN ke fps asli kamera produksi Anda:
+#   track_buffer = detik_toleransi_oklusi_yang_diinginkan * fps_asli
+tracker_type: ocsort
+track_high_thresh: 0.15
+track_low_thresh: 0.1
+new_track_thresh: 0.15
+track_buffer: 450
+match_thresh: 0.8
+fuse_score: True
+
+# OC-SORT specifics
+delta_t: 3
+# inertia diturunkan dari default 0.2 -> kendaraan yang PARKIR/diam saat
+# loading tidak punya arah gerak yang konsisten utk dijadikan sinyal kuat;
+# turunkan bobot konsistensi arah supaya tidak salah menghukum objek diam.
+inertia: 0.1
+use_byte: False

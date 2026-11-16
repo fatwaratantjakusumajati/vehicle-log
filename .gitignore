@@ -1,0 +1,37 @@
+﻿@"
+# Environment & secrets
+.env
+venv_311/
+__pycache__/
+*.pyc
+
+# Editor / tools
+.vscode/
+.kombai/
+
+# Log & debug
+*.log
+logs/
+debug.txt
+events_cam1.jsonl
+
+# Model & data besar
+*.pkl
+*.pkl.bak
+*.bak
+*.7z
+*.zip
+*_openvino_model/
+evidence_cam1/
+person_crops/
+klip/
+fk_samples/
+data_orang/
+sampel_bak_v2/
+tes/
+cek_deteksi_hasil.jpg
+backup*.txt
+
+# File nyasar
+s -ExecutionPolicy*
+"@ | Out-File -Encoding utf8 .gitignorelabel_tambahan.txt
