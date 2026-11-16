@@ -35,3 +35,4 @@ backup*.txt
 # File nyasar
 s -ExecutionPolicy*
 "@ | Out-File -Encoding utf8 .gitignorelabel_tambahan.txt
+label_tambahan.txt
