@@ -142,7 +142,7 @@ def draw_and_save_preview(frame, roi, out_path="roi_preview.jpg"):
 
 def main():
     parser = argparse.ArgumentParser(description="Pilih ROI dari stream RTSP")
-    parser.add_argument("rtsp_url", help="URL RTSP, contoh: rtsp://user:pass@192.168.1.10:554/stream")
+    parser.add_argument("rtsp_url", help="URL RTSP, contoh: rtsp://user:pass@192.168.1.xxx:554/stream")
     parser.add_argument("--save-preview", action="store_true", help="Simpan gambar preview dengan kotak ROI")
     args = parser.parse_args()
 

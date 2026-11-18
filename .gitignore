@@ -1,27 +1,39 @@
-﻿@"
 # Environment & secrets
 .env
-venv_311/
-__pycache__/
-*.pyc
+.env.*
+!.env.example
 
-# Editor / tools
+# Python virtual environment & cache
+venv*/
+env/
+__pycache__/
+*.py[cod]
+
+# Editor & tools
 .vscode/
+.idea/
 .kombai/
 
-# Log & debug
+# Logs & runtime outputs
 *.log
 logs/
 debug.txt
 events_cam1.jsonl
+n8n_outbox*.jsonl
 
-# Model & data besar
+# Model weights & binary data
 *.pkl
 *.pkl.bak
 *.bak
 *.7z
 *.zip
+*.tar.gz
+*.pt
+*.pth
+*.onnx
 *_openvino_model/
+
+# Datasets, captures & training artifacts
 evidence_cam1/
 person_crops/
 klip/
@@ -29,10 +41,16 @@ fk_samples/
 data_orang/
 sampel_bak_v2/
 tes/
+negatif/
+box/
+runs/
+ForkliftProject.v1i.yolov11/
+dataset_gabungan/
 cek_deteksi_hasil.jpg
+zones_preview.jpg
+frame*.jpg
+kontak.jpg
 backup*.txt
 
-# File nyasar
+# File nyasar / temporary
 s -ExecutionPolicy*
-"@ | Out-File -Encoding utf8 .gitignorelabel_tambahan.txt
-label_tambahan.txt

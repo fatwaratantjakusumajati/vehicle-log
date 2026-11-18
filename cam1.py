@@ -184,6 +184,17 @@ class Cfg:
         # (dashboard 4 Nov 07:44: foto Masuk & Keluar = forklift). Kotak dengan oranye >= nilai ini dianggap forklift berapa pun ukurannya,
         # KECUALI kotak itu menimpa sesi yang sudah ada (kendaraan + forklift menempel -> diperlakukan 'gabungan', sesi tetap hidup).
         self.orange_big_pct = e("CAM1_ORANGE_BIG_PCT", 6.0)
+        # [SESI-GANDA] kotak KECIL (pecahan truk yang sebagian tertutup forklift/orang) di dalam/dekat truk yang sedang aktif jangan dibuka jadi sesi baru
+        # dan jangan dipakai SERAH-TERIMA yang mengecilkan kotak sesi. Nilai = jendela (detik) sejak sesi itu terakhir terlihat. 0 = mati.
+        # [FOTO-AWAL-AKHIR] cadangan: bila keputusan biasa gagal/dibuang, pakai label muatan awal (Kosong/Bermuatan) -> akhir. 0 = mati.
+        self.foto_fb = e("CAM1_FOTO_FB", 0)
+        self.foto_fb_empty = e("CAM1_FOTO_FB_EMPTY", 0.45)    # skor awal/akhir <= ini = Kosong
+        self.foto_fb_loaded = e("CAM1_FOTO_FB_LOADED", 0.50)  # skor awal/akhir >= ini = Bermuatan
+        self.foto_fb_delta = e("CAM1_FOTO_FB_DELTA", 0.10)    # selisih minimal skor akhir - awal
+        self.open_guard = e("CAM1_OPEN_GUARD", 0.0)
+        self.open_guard_ratio = e("CAM1_OPEN_GUARD_RATIO", 0.6)     # kandidat dianggap pecahan bila luasnya < ratio x luas kotak sesi
+        self.open_guard_expand = e("CAM1_OPEN_GUARD_EXPAND", 1.5)   # pusat kandidat harus di dalam kotak sesi yang diperbesar sekian x
+        self.green_big_pct = e("CAM1_GREEN_BIG_PCT", 0.0)       # [FK-HIJAU] 0 = mati. Kotak 'truk' yang >= persen ini hijau-tosca = forklift hijau (disarankan uji 3.0)
         self.sess_orange_frac = e("CAM1_SESS_ORANGE_FRAC", 0.5)   # sesi yang >= pecahan ini pembaruannya beroranye besar = forklift, MASUK ditahan. 0 = mati
         self.track_conf = e("CAM1_TRACK_CONF", 0.30)       # deteksi selemah ini boleh MELANJUTKAN sesi (bukan membuka)
         self.max_sessions = e("CAM1_MAX_SESSIONS", 3, int)
@@ -221,6 +232,9 @@ class Cfg:
         self.announce_min_samples = e("CAM1_ANNOUNCE_MIN_SAMPLES", 4, int)   # MASUK baru diumumkan setelah >= sekian sampel bak valid (forklift+pengemudi parkir hampir tak punya sampel). 0 = mati
         self.announce_wait = e("CAM1_ANNOUNCE_WAIT", 90.0, float)           # ...kecuali kendaraan sudah terlihat selama ini (dtk): jangan sampai kendaraan sungguhan yang bak-nya lama tertutup tak pernah tercatat
         self.fk_ovl_min_n = e("CAM1_FK_OVL_MIN_N", 10, int)          # minimal pembaruan sebelum aturan di atas berlaku
+        # [FK-OVL-VETO] hitung juga forklift yang dibuang gerbang FK-HANTU (conf >= fk_veto_conf, ingatan fk_veto_mem dtk) dan forklift yang baru lewat
+        # (ingatan _fk_mem) pada hitungan 'kotak sesi tertutup kotak forklift'. 0 = mati. Dipakai bersama CAM1_FK_OVL_MAX (disarankan 0.3).
+        self.fk_ovl_veto = e("CAM1_FK_OVL_VETO", 0, int)
         self.fk_min_crop = e("CAM1_FK_MIN_CROP", 40, int)            # sisi terpendek crop forklift (px)
         self.sample_dump_interval = e("CAM1_SAMPLE_DUMP_INTERVAL", 8.0)   # simpan 1 crop bak tiap sekian dtk per sesi (+ crop tambahan bila skor berubah >= 0.15). 0 = perilaku lama (tiap sampel, 150 pertama)
         self.sample_dump_max = e("CAM1_SAMPLE_DUMP_MAX", 250, int)         # batas crop tersimpan per sesi
@@ -233,6 +247,17 @@ class Cfg:
         # [FIX-FK-HANTU] deteksi model forklift dengan conf < nilai ini HARUS mengandung piksel oranye (>= orange_min_pct),
         # kalau tidak dibuang (model sering salah mengenali truk boks putih sebagai forklift). 0 = gerbang mati.
         self.fk_orange_gate = e("CAM1_FK_ORANGE_GATE", 0.85)
+        # [FK-VETO] forklift NON-oranye yang terdeteksi MODEL forklift (conf >= fk_veto_conf) tetapi dibuang gerbang FK-HANTU tidak ikut menolak kotak
+        # "truk" di atasnya, padahal YOLO memberi label truck untuk forklift (tidak ada kelas forklift). Bila aktif (1): kandidat KENDARAAN KECIL
+        # (rasio luas <= fk_veto_max_ratio) yang >= fk_veto_cover bagiannya tertutup kotak forklift itu (dalam fk_veto_mem dtk terakhir), conf YOLO-nya
+        # < fk_veto_max_conf, dan TIDAK bertumpuk dengan kendaraan yang sudah diumumkan, dianggap FORKLIFT. Truk besar / yakin / terkonfirmasi tidak terpengaruh.
+        # Default 0 (mati): perilaku lama.
+        self.fk_veto = e("CAM1_FK_VETO", 0, int)
+        self.fk_veto_conf = e("CAM1_FK_VETO_CONF", 0.45)
+        self.fk_veto_cover = e("CAM1_FK_VETO_COVER", 0.60)
+        self.fk_veto_max_ratio = e("CAM1_FK_VETO_MAX_RATIO", 0.07)
+        self.fk_veto_max_conf = e("CAM1_FK_VETO_MAX_CONF", 0.70)
+        self.fk_veto_mem = e("CAM1_FK_VETO_MEM", 3.0)
         # [FK-GARPU] forklift yang tampak hanya GARPU (tubuh oranye tertutup truk) tidak lolos gerbang oranye. Bila aktif (1), deteksi
         # tidak-oranye tetap DITERIMA hanya jika: ada sesi truk parkir yang sudah diumumkan, pusatnya di sekitar kotak truk itu
         # (diperluas fk_garpu_pad) atau di poligon stage, DAN kotaknya kecil (<= fk_garpu_area x luas truk; truk boks yang salah baca tidak lolos).
@@ -335,6 +360,11 @@ class Cfg:
         self.presence_dist = e("CAM1_PRESENCE_DIST", 1.0)              # jarak histogram warna maks (0 identik, 1 beda total); 1.0 = tidak dipakai (cahaya berubah menggeser warna), tetap dicatat di log
         self.presence_chain = e("CAM1_PRESENCE_CHAIN", 0.80)           # [PRESENSI-BERANTAI] korelasi antar-pemeriksaan (4 dtk); perubahan PELAN (pintu/cahaya) = masih ada, 0 = mati
         self.presence_max_hold = e("CAM1_PRESENCE_MAX_HOLD", 3600.0)   # batas tahan (dtk) sejak deteksi terakhir
+        # [PRESENSI-TUTUP] area parkir yang TERTUTUP forklift (korelasi turun karena ada forklift di depan kendaraan) bukan bukti kendaraan pergi:
+        # pemeriksaan dianggap tak meyakinkan dan sesi ditahan paling lama presence_occl dtk berturut-turut. 0 = mati (perilaku lama).
+        self.presence_occl = e("CAM1_PRESENCE_OCCL", 0.0)
+        self.presence_occl_cover = e("CAM1_PRESENCE_OCCL_COVER", 0.15)  # bagian area parkir yang tertutup kotak forklift (0..1) agar dianggap tertutup
+        self.presence_occl_cover_max = e("CAM1_PRESENCE_OCCL_COVER_MAX", 0.60)  # tertutup >= ini = "kotak itu forklift-nya sendiri", bukan kendaraan yang tertutup -> tidak ditahan
         # [FIX-PEMILIK-FK] 1 = forklift dimiliki sesi yang kotaknya PALING DEKAT dengan pusat forklift (bukan yang tumpang-tindihnya terbesar)
         self.fk_owner_nearest = e("CAM1_FK_OWNER_NEAREST", 1, int)
         # [FIX-UMUMKAN] kendaraan yang bak-nya terus tertutup orang/forklift (0 sampel) tetap boleh diumumkan bila deteksinya kuat berulang
@@ -377,6 +407,8 @@ class Cfg:
         # [ARAH-ORANG] arah Loading/Unloading dari ORANG yang membawa barang (kendaraan tertutup/van tanpa forklift).
         # Hanya MENGISI kekosongan: dipakai bila keputusan lain = "Tidak Dapat Dipastikan". 0 = mati.
         self.pc_enable = e("CAM1_PC_ENABLE", 1, int)
+        # [PC-SETELAH-FK] arah-orang juga dicoba bila forklift SUNGGUHAN ada tetapi jalur forklift tidak memberi arah (tanpa transisi bawa/kosong). 0 = mati.
+        self.pc_after_fk = e("CAM1_PC_AFTER_FK", 0, int)
         # [FIX-FK-HANTU-ORANG] forklift hantu sesaat (skor sedikit, < fk_near_min dtk) tidak boleh memblokir arah-dari-orang. 0 = perilaku lama.
         self.pc_fk_obs_max = e("CAM1_PC_FK_OBS_MAX", 3, int)
         self.pc_conf = e("CAM1_PC_CONF", 0.30)                       # conf YOLO minimal untuk orang yang dinilai
@@ -538,6 +570,15 @@ def orange_pct(crop):
     return float(cv2.inRange(hsv, (3, 140, 120), (20, 255, 255)).mean()) / 255.0 * 100.0
 
 
+def green_pct(crop):
+    """[FK-HIJAU] Persentase piksel hijau-tosca (forklift sewaan non-oranye). Hue 74-94 (biru kerucut ~105 dan kontainer 0% tidak ikut)."""
+    if crop is None or crop.size == 0:
+        return 0.0
+    small = cv2.resize(crop, (160, 96), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    return float(cv2.inRange(hsv, (74, 90, 90), (94, 255, 255)).mean()) / 255.0 * 100.0
+
+
 def clip_box(b, w, h, pad=0.0):
     bw, bh = b[2] - b[0], b[3] - b[1]
     x1, y1 = int(max(0, b[0] - bw * pad)), int(max(0, b[1] - bh * pad))
@@ -602,6 +643,31 @@ def fmt_ts(t):
 # ----------------------------------------------------------------------------------------------
 # Penentu Loading / Unloading (fungsi murni -> mudah diuji)
 # ----------------------------------------------------------------------------------------------
+def foto_arah(res, cfg):
+    """[FOTO-AWAL-AKHIR] Loading bila tiba KOSONG lalu pergi BERMUATAN, Unloading bila sebaliknya; selain itu None.
+    Memakai skor awal/akhir yang sama dengan label status_muatan_awal/akhir (p_to_status), plus selisih minimal."""
+    if cfg.foto_fb <= 0:
+        return None
+    e, l = res.get("early"), res.get("late")
+    if e is None or l is None:
+        return None
+    if e <= cfg.foto_fb_empty and l >= cfg.foto_fb_loaded and (l - e) >= cfg.foto_fb_delta:
+        return LOADING
+    if e >= cfg.foto_fb_loaded and l <= cfg.foto_fb_empty and (e - l) >= cfg.foto_fb_delta:
+        return UNLOADING
+    return None
+
+
+def pc_allowed(res, fk_seconds, fk_obs_n, cfg):
+    """Apakah jalur arah-orang boleh dicoba saat sesi ditutup. Jalur lama: keputusan belum ada, forklift tidak aktif lama dan hanya sedikit skor forklift.
+    [PC-SETELAH-FK] (opsional): forklift sungguhan ada, tetapi tidak memberi arah (tidak ada bukti 'forklift_arah') -> arah-orang tetap dicoba."""
+    if not cfg.pc_enable or res.get("status") not in (None, UNSURE):
+        return False
+    if fk_seconds < cfg.fk_near_min and fk_obs_n <= cfg.pc_fk_obs_max:
+        return True
+    return bool(cfg.pc_after_fk and "forklift_arah" not in (res.get("terms") or {}))
+
+
 def p_to_status(p):
     return None if p is None else ("Bermuatan" if p >= 0.5 else "Kosong")
 
@@ -943,7 +1009,11 @@ def make_pc_scorer():
             return None
         return person_carry.carry_probability
     except Exception as e:
-        log.warning("person_carry tidak tersedia (%s)", e)
+        import sys as _sys
+        _pm = _sys.modules.get("person_carry")
+        log.warning("person_carry tidak tersedia (%s) | berkas yang terimpor: %s | isi modul: %s", e,
+                    getattr(_pm, "__file__", None) or getattr(_pm, "__path__", None) or "tidak ada",
+                    [n for n in dir(_pm) if not n.startswith("__")][:12] if _pm is not None else "-")
         return None
 
 
@@ -1692,6 +1762,7 @@ class Session:
         self.ref_thumb, self.ref_t = None, -1e9
         self.pres_prev, self.pres_chain = None, False      # [PRESENSI] acuan cuplikan area kendaraan saat masih terdeteksi
         self.t_present, self.pres_t, self.pres_log_t, self.pres_n, self.pres_ok = None, -1e9, -1e9, 0, None
+        self.occl_t0 = None                 # [PRESENSI-TUTUP] awal penutupan area parkir oleh forklift
         self.last_parked_bbox = None
         self.departing = False              # [FIX-PERGI] kotak terakhir sudah kecil & menjauh dari titik parkir
         self.frag_n = 0                     # [FIX-FRAGMEN] berapa kali kotak kecil di dalam truk diabaikan
@@ -1748,9 +1819,9 @@ class Cam1Monitor:
                  cfg.review_min, cfg.arrival_prior, cfg.prior_review, cfg.entry_seconds, cfg.settle,
                  ",".join(f"{v:g}" for v in BED_BOX), cfg.person_bed_only, cfg.fk_crop_pad, cfg.fk_llr,
                  cfg.fk_stage, "ADA" if zones.has_stage() else "BELUM digambar")
-        log.info("build cam1: FIX-UKURAN-2(ref=kotak terakhir) PRESENSI FIX-FRAGMEN FIX-PERGI | ratio=%.1f | FIX-PEMILIK-FK nearest=%d | FK-memory=%.0fs | FIX-UMUMKAN strong=%d | moving_grace=%.0f parked_grace=%.0f | frag_ratio=%.2f depart_ratio=%.2f depart_grace=%.0f | dock_min_ratio=%.3f | FIX-PINDAH hits=%d window=%.0f | roi_ext_top=%.2f edge_margin=%.2f edge_park=%.0f",
+        log.info("build cam1: FIX-UKURAN-2(ref=kotak terakhir) PRESENSI FIX-FRAGMEN FIX-PERGI | ratio=%.1f | FIX-PEMILIK-FK nearest=%d | FK-memory=%.0fs | FIX-UMUMKAN strong=%d | moving_grace=%.0f parked_grace=%.0f | frag_ratio=%.2f depart_ratio=%.2f depart_grace=%.0f | dock_min_ratio=%.3f | FIX-PINDAH hits=%d window=%.0f | roi_ext_top=%.2f edge_margin=%.2f edge_park=%.0f | PRESENSI-TUTUP occl=%.0f cover=%.2f | FK-VETO=%d conf>=%.2f | FK-HIJAU>=%.1f%% | SESI-GANDA=%.0f | FOTO-FB=%d | PC-SETELAH-FK=%d | FK-OVL-VETO=%d max=%.2f",
                  cfg.match_size_ratio, cfg.fk_owner_nearest, cfg.fk_mem_sec, cfg.announce_strong, cfg.moving_grace, cfg.parked_grace,
-                 cfg.frag_ratio, cfg.depart_ratio, cfg.depart_grace, cfg.dock_min_ratio, cfg.relocate_hits, cfg.relocate_window, cfg.roi_ext_top, cfg.edge_margin, cfg.edge_park)
+                 cfg.frag_ratio, cfg.depart_ratio, cfg.depart_grace, cfg.dock_min_ratio, cfg.relocate_hits, cfg.relocate_window, cfg.roi_ext_top, cfg.edge_margin, cfg.edge_park, cfg.presence_occl, cfg.presence_occl_cover, cfg.fk_veto, cfg.fk_veto_conf, cfg.green_big_pct, cfg.open_guard, cfg.foto_fb, cfg.pc_after_fk, cfg.fk_ovl_veto, cfg.fk_ovl_max)
         if cfg.fk_llr <= 0:
             log.warning("CAM1_FK_LLR=%.2f -> bobot arah forklift NOL: gerakan forklift (termasuk lokasi tumpukan) TIDAK ikut menentukan status", cfg.fk_llr)
         if BED_BOX != (0.2, 0.3, 0.95, 0.85):
@@ -1763,6 +1834,8 @@ class Cam1Monitor:
         self.last_fk = []                   # kotak forklift frame terakhir (overlay)
         self.rej = {}                       # diagnostik: alasan kendaraan (car/truck) tidak jadi kandidat/sesi -> [jumlah, contoh]
         self._fk_mem = []                   # [PATCH-1] [(waktu, kotak forklift)] beberapa detik terakhir
+        self._fk_veto_mem = []              # [FK-VETO] [(waktu, kotak, conf)] forklift non-oranye yang dibuang gerbang FK-HANTU
+        self.fk_veto_n = 0
 
     @property
     def s(self):
@@ -1849,6 +1922,27 @@ class Cam1Monitor:
                 max(iou(d, r), inter_area(d, r) / max(1.0, min(area(d), area(r)))) >= 0.5
                 for s_ in self.sessions for r in ([s_.bbox] + ([s_.last_parked_bbox] if s_.last_parked_bbox else [])))
             return "merged" if on_session else "forklift"
+        # [FK-HIJAU] forklift hijau-tosca (sewaan): sama seperti aturan oranye besar, tapi untuk warna hijau
+        if c.green_big_pct > 0:
+            _g = green_pct(crop_vehicle(frame, d))
+            if _g >= c.green_big_pct:
+                self.green_n = getattr(self, "green_n", 0) + 1
+                if self.green_n in (1, 5, 20) or self.green_n % 100 == 0:
+                    log.info("FK-HIJAU kotak '%s' dianggap forklift hijau (hijau=%.1f%% >= %.1f%%, conf YOLO=%.2f, rasio=%.3f) pusat=(%d,%d) total=%d",
+                             getattr(d, "cls", "?"), _g, c.green_big_pct, float(d.conf), ratio, *center(d), self.green_n)
+                on_session = any(
+                    max(iou(d, r), inter_area(d, r) / max(1.0, min(area(d), area(r)))) >= 0.5
+                    for s_ in self.sessions for r in ([s_.bbox] + ([s_.last_parked_bbox] if s_.last_parked_bbox else [])))
+                return "merged" if on_session else "forklift"
+        # [FK-VETO] forklift non-oranye yang dibuang gerbang FK-HANTU: kandidat kecil yang tertutup kotaknya = forklift itu sendiri
+        if c.fk_veto > 0 and self._fk_veto_mem and ratio <= c.fk_veto_max_ratio and float(d.conf) < c.fk_veto_max_conf:
+            for _t, _fb, _cf in self._fk_veto_mem:
+                if inter_area(d, _fb) / max(1.0, a_d) >= c.fk_veto_cover:
+                    self.fk_veto_n += 1
+                    if self.fk_veto_n in (1, 5, 20) or self.fk_veto_n % 100 == 0:
+                        log.info("FK-VETO kotak 'truk' dianggap forklift non-oranye (conf YOLO=%.2f, conf forklift=%.2f, rasio=%.3f) pusat=(%d,%d) total=%d",
+                                 float(d.conf), _cf, ratio, *center(d), self.fk_veto_n)
+                    return "forklift"
         return "ok"
 
     # ---- filter kandidat ------------------------------------------------------------------
@@ -2176,8 +2270,7 @@ class Cam1Monitor:
                      self._fk_stage(s), t_end=t_out, docked=docked,
                      manual=s.skip.get("orang_di_kotak", 0), final=True)
         # [ARAH-ORANG] keputusan lain "Tidak Dapat Dipastikan" -> coba arah dari orang yang membawa barang (van/boks tanpa forklift)
-        if (self.cfg.pc_enable and res.get("status") in (None, UNSURE) and s.fk_seconds < self.cfg.fk_near_min
-                and sum(len(tr["obs"]) for tr in s.fk_tracks) <= self.cfg.pc_fk_obs_max):   # forklift sungguhan (skor banyak / dekat lama) -> jalur lama, JANGAN disentuh; hantu sesaat boleh
+        if pc_allowed(res, s.fk_seconds, sum(len(tr["obs"]) for tr in s.fk_tracks), self.cfg):   # forklift sungguhan (skor banyak / dekat lama) -> jalur lama, JANGAN disentuh; hantu sesaat boleh
             try:
                 for _ti, _tr in enumerate(s.pc_tracks):      # seri mentah per orang: detik:P(bawa):jarak_ke_kendaraan:S=di stage
                     log.info("ARAH-ORANG-SERI %s orang%d | %s", s.vid, _ti, " ".join(
@@ -2216,8 +2309,27 @@ class Cam1Monitor:
             res["review"] = True
             res["reason"] = (res.get("reason", "") + "; aktivitas di stage tanpa arah forklift: "
                              "arah skor bak tidak cukup untuk mengesahkan status -> perlu review")
+        # [FOTO-AWAL-AKHIR] arah dari label muatan awal -> akhir (hanya bila saklar CAM1_FOTO_FB menyala). Tidak mengubah sesi yang sudah
+        # diputuskan jalur lain; hanya (a) mempertahankan tebakan lemah yang SEARAH, atau (b) mengisi 'Tidak Dapat Dipastikan'. Selalu PERLU REVIEW.
+        _fa = foto_arah(res, self.cfg)
+        _fa_keep = False
+        if _fa is not None:
+            if res.get("status") == _fa and res.get("source") not in ("orang_arah", "orang_jarak"):
+                _fa_keep = True
+                res["review"] = True
+                res["reason"] = (res.get("reason", "") + "; " if res.get("reason") else "") + \
+                    f"dipertahankan: muatan awal {p_to_status(res['early'])} -> akhir {p_to_status(res['late'])} searah {_fa}"
+                log.info("FOTO-AWAL-AKHIR %s | tebakan %s dipertahankan (muatan awal %.2f -> akhir %.2f)", s.vid, _fa, res["early"], res["late"])
+            elif res.get("status") in (None, UNSURE):
+                res["status"], res["source"] = _fa, "foto_awal_akhir"
+                res["confidence"] = min(float(res.get("confidence") or 0.0) or 0.4, 0.45)
+                res["review"] = True
+                res["reason"] = (res.get("reason", "") + "; " if res.get("reason") else "") + \
+                    f"arah dari muatan awal {p_to_status(res['early'])} ({res['early']:.2f}) -> akhir {p_to_status(res['late'])} ({res['late']:.2f}) -> {_fa}; perlu review"
+                _fa_keep = True
+                log.info("FOTO-AWAL-AKHIR %s | status diisi %s (muatan awal %.2f -> akhir %.2f)", s.vid, _fa, res["early"], res["late"])
         # [TINGKAT-A] bukti arah tidak ada, tapi truk parkir dan ada orang bekerja di stage -> catat sebagai AKTIVITAS (arah tidak ditebak)
-        _lemah = (self.cfg.stage_act_down and res.get("review") and res.get("status") in (LOADING, UNLOADING) and res.get("source") not in ("orang_arah", "orang_jarak")
+        _lemah = (self.cfg.stage_act_down and not _fa_keep and res.get("review") and res.get("status") in (LOADING, UNLOADING) and res.get("source") not in ("orang_arah", "orang_jarak")
                   and s.fk_seconds < self.cfg.fk_near_min)          # tebakan lemah tanpa forklift -> jangan dipertahankan
         if ((res.get("status") in (None, UNSURE) or _lemah) and self.cfg.stage_act_min > 0 and s.stg_sec >= self.cfg.stage_act_min):
             _tebakan = f" (tebakan sistem sebelumnya: {res['status']}, keyakinan {res['confidence']:.2f}, tidak dipakai)" if _lemah else ""
@@ -2695,7 +2807,11 @@ class Cam1Monitor:
             s.park_tick = now
             s.n_upd += 1
             a_s = max(1.0, area(s.bbox))
-            if any(inter_area(s.bbox, fk) / a_s >= 0.6 for fk in fks):
+            _fkx = list(fks)
+            if c.fk_ovl_veto > 0:    # [FK-OVL-VETO] + forklift yang dibuang gerbang & forklift yang baru lewat
+                _fkx += [x[1] for x in (getattr(self, "_fk_veto_mem", []) or []) if now - x[0] <= c.fk_veto_mem]
+                _fkx += [b_ for _, b_ in (getattr(self, "_fk_mem", []) or [])]
+            if any(inter_area(s.bbox, fk) / a_s >= 0.6 for fk in _fkx):
                 s.fk_ovl_n += 1
             if s.sig is not None and now - s.sig_t >= 5.0:
                 new = appearance_sig(frame, s.bbox)
@@ -2777,9 +2893,38 @@ class Cam1Monitor:
             log.info("GERBANG-KENDARAAN %s | MASUK ditahan: %s", s.vid, why)
         return why is None
 
+    def _guard_fragment_of(self, bb, now):
+        """[SESI-GANDA] sesi aktif terkonfirmasi yang kotaknya memuat kandidat kecil ini (pecahan truk), selain itu None."""
+        c = self.cfg
+        if c.open_guard <= 0:
+            return None
+        a = max(1.0, area(bb))
+        cx, cy = center(bb)
+        for old in self.sessions:
+            if not old.announced or now - old.t_last > c.open_guard:
+                continue
+            for ref in (old.last_parked_bbox, old.bbox):
+                if ref is None:
+                    continue
+                a_ref = max(1.0, area(ref))
+                if a >= c.open_guard_ratio * a_ref:
+                    continue
+                rx, ry = center(ref)
+                hw, hh = (ref[2] - ref[0]) * c.open_guard_expand / 2.0, (ref[3] - ref[1]) * c.open_guard_expand / 2.0
+                if abs(cx - rx) <= hw and abs(cy - ry) <= hh:
+                    return old
+        return None
+
     def _open_session(self, p, now):
         c = self.cfg
         bb = p["items"][-1][1]
+        _g = self._guard_fragment_of(bb, now)
+        if _g is not None:
+            self.guard_n = getattr(self, "guard_n", 0) + 1
+            if self.guard_n in (1, 5, 20) or self.guard_n % 100 == 0:
+                log.info("SESI-GANDA-DITOLAK kotak kecil (luas %.0f%% kotak %s, conf=%.2f, pusat (%d,%d)) dianggap pecahan kendaraan yang sama, TIDAK dibuka sesi baru / tidak diserahterimakan | total=%d",
+                         100.0 * area(bb) / max(1.0, area(_g.last_parked_bbox or _g.bbox)), _g.vid, float(p["items"][-1][2]), *center(bb), self.guard_n)
+            return
         # sesi lama yang masih "menggantung" di tempat yang sama = kendaraan lama sudah pergi
         for old in list(self.sessions):
             ref = old.last_parked_bbox or old.bbox
@@ -2927,11 +3072,15 @@ class Cam1Monitor:
         fks = self._forklift_boxes(frame)               # untuk OBSERVASI (arah forklift): hanya yang di dalam area
         fks_extra = []                                  # forklift di luar area/zona exclude: hanya untuk MENOLAK kandidat kendaraan
         self._fk_conf = []
+        if c.fk_veto > 0 or c.fk_ovl_veto > 0:
+            self._fk_veto_mem = [x for x in self._fk_veto_mem if now - x[0] <= c.fk_veto_mem]
         for fd in fk_dets or []:
             # [FIX-FK-HANTU] buang "forklift" yang tidak oranye & tidak sangat yakin (truk boks putih terbaca forklift)
             if c.fk_orange_gate > 0:
                 _cf = float(fd[4]) if len(fd) > 4 else 1.0
                 if _cf < c.fk_orange_gate and orange_pct(crop_vehicle(frame, tuple(fd[:4]))) < c.orange_min_pct and not self._fk_garpu_ok(tuple(fd[:4]), _cf):
+                    if (c.fk_veto > 0 or c.fk_ovl_veto > 0) and _cf >= c.fk_veto_conf:
+                        self._fk_veto_mem.append((now, tuple(fd[:4]), _cf))
                     self.fk_ghost_n = getattr(self, "fk_ghost_n", 0) + 1
                     if self.fk_ghost_n in (1, 10, 100) or self.fk_ghost_n % 500 == 0:
                         log.info("FK-HANTU dibuang (tidak oranye, conf=%.2f < %.2f) pusat=(%d,%d) total=%d",
@@ -3069,6 +3218,22 @@ class Cam1Monitor:
             used_s.add(si)
             used_c.add(ci)
 
+    def _spot_covered(self, bb, now):
+        """[PRESENSI-TUTUP] benar bila kotak forklift (frame ini atau beberapa dtk terakhir) menutup >= presence_occl_cover luas area parkir bb."""
+        c = self.cfg
+        A = max(1.0, area(bb))
+        boxes = list(getattr(self, "last_fk", []) or []) + [b_ for _, b_ in (getattr(self, "_fk_mem", []) or [])]
+        for fb in boxes:
+            iw = min(bb[2], fb[2]) - max(bb[0], fb[0])
+            ih = min(bb[3], fb[3]) - max(bb[1], fb[1])
+            if iw > 0 and ih > 0:
+                frac = (iw * ih) / A
+                if frac >= c.presence_occl_cover_max:
+                    return False                  # area parkir hampir seluruhnya = forklift: sesi ini kemungkinan forklift itu sendiri
+                if frac >= c.presence_occl_cover:
+                    return True
+        return False
+
     def _presence_tick(self, s, frame, now):
         """[PRESENSI] sesi parkir yang tak terdeteksi pada frame ini: apakah area parkirnya masih tampak seperti kendaraan tadi?"""
         c = self.cfg
@@ -3087,13 +3252,27 @@ class Cam1Monitor:
         elif not (s.pres_chain and c.presence_chain > 0 and ncc_prev >= c.presence_chain):
             s.pres_chain = False                      # berubah mendadak (mis. truk pergi) -> rantai putus
         ok = ok_ref or s.pres_chain
+        occl_hold = False
+        if c.presence_occl > 0:
+            if ok:
+                s.occl_t0 = None
+            elif self._spot_covered(bb, now):
+                if getattr(s, "occl_t0", None) is None:
+                    s.occl_t0 = now
+                if now - s.occl_t0 <= c.presence_occl:
+                    ok, occl_hold = True, True
+            else:
+                s.occl_t0 = None
         if ok:
             s.t_present = now
         if s.pres_n == 0 or ok != s.pres_ok or now - s.pres_log_t >= 60.0:
             s.pres_log_t = now
+            if occl_hold:
+                _msg = "TERTUTUP forklift, bukan bukti pergi (sesi ditahan %.0f/%.0f dtk)" % (now - s.occl_t0, c.presence_occl)
+            else:
+                _msg = ("MASIH ADA (sesi ditahan)" if ok_ref else "MASIH ADA (berubah pelan, rantai)") if ok else "tidak sama (hitung mundur keluar)"
             log.info("PRESENSI %s | tak terdeteksi %.0f dtk | korelasi=%.2f (>=%.2f) antar-cek=%.2f (>=%.2f) warna=%.2f (<=%.2f) -> %s", s.vid, now - s.t_last,
-                     ncc, c.presence_ncc, ncc_prev, c.presence_chain, dist, c.presence_dist,
-                     ("MASIH ADA (sesi ditahan)" if ok_ref else "MASIH ADA (berubah pelan, rantai)") if ok else "tidak sama (hitung mundur keluar)")
+                     ncc, c.presence_ncc, ncc_prev, c.presence_chain, dist, c.presence_dist, _msg)
         s.pres_n += 1
         s.pres_ok = ok
 

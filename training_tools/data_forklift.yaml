@@ -1,0 +1,5 @@
+path: C:\Users\ASUS NUC 13 PRO\Documents\Fatwa\code\plate-det\dataset_gabungan
+train: images/train
+val: images/val
+names:
+  0: forklift
