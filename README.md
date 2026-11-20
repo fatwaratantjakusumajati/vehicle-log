@@ -139,6 +139,8 @@ Script training membagi data berdasarkan sesi video agar crop dari sesi yang sam
 ### 5. Zona CAM 1
 `cam1_zones.json` memakai koordinat normal 0–1 terhadap ukuran frame. Sesuaikan poligon `area`, `dock`, dan `stage` dengan kamera. `unload_target` adalah titik pada area tujuan Unloading; gerak orang yang membawa barang menuju titik tersebut dihitung sebagai Unloading. Kalibrasi titik ini untuk sudut kamera masing-masing.
 
+Gerbang `MASUK` CAM 1 juga memiliki jalur konfirmasi awal untuk kendaraan dengan deteksi kuat berulang: jika jumlah deteksi mencapai `CAM1_ANNOUNCE_STRONG` dan kendaraan diam stabil selama `CAM1_PARK_MIN_RUN`, sistem dapat mencatat kendaraan tanpa menunggu `CAM1_PARK_CONFIRM`/`CAM1_PARK_TOTAL`. Veto forklift dan warna tetap berlaku.
+
 ### 3. Kalibrasi Zona Poligon (ROI)
 Gunakan tool interaktif di folder `training_tools/` untuk menggambar poligon area pantau:
 

@@ -368,8 +368,8 @@ class Cfg:
         self.presence_occl_cover_max = e("CAM1_PRESENCE_OCCL_COVER_MAX", 0.60)  # tertutup >= ini = "kotak itu forklift-nya sendiri", bukan kendaraan yang tertutup -> tidak ditahan
         # [FIX-PEMILIK-FK] 1 = forklift dimiliki sesi yang kotaknya PALING DEKAT dengan pusat forklift (bukan yang tumpang-tindihnya terbesar)
         self.fk_owner_nearest = e("CAM1_FK_OWNER_NEAREST", 1, int)
-        # [FIX-UMUMKAN] kendaraan yang bak-nya terus tertutup orang/forklift (0 sampel) tetap boleh diumumkan bila deteksinya kuat berulang
-        # (>= N deteksi conf >= confirm_conf) DAN sudah parkir diam >= park_confirm. Sebelumnya wajib hidup >= announce_wait (90 dtk). 0 = mati.
+        # [FIX-UMUMKAN] N deteksi kuat + parkir stabil minimal CAM1_PARK_MIN_RUN dapat memakai jalur konfirmasi awal,
+        # tanpa menunggu park_confirm/park_total yang panjang. Tetap tunduk pada veto forklift/oranye. 0 = mati.
         self.announce_strong = e("CAM1_ANNOUNCE_STRONG", 10, int)
         self.handover_dist = e("CAM1_HANDOVER_DIST", 0.60)      # jarak tampilan (histogram HSV) maksimum untuk serah-terima sesi
         self.review_min = e("CAM1_REVIEW_MIN", 0.30)
@@ -1794,6 +1794,7 @@ class Session:
         self.fk_ovl_n = 0                   # pembaruan di mana kotak sesi >= 60% tertutup kotak forklift
         self.n_upd = 0                      # jumlah pembaruan (kotak bersih)
         self.gate_logged = False
+        self.park_strong_gate_logged = False
         self.ref_thumb, self.ref_t = None, -1e9
         self.pres_prev, self.pres_chain = None, False      # [PRESENSI] acuan cuplikan area kendaraan saat masih terdeteksi
         self.t_present, self.pres_t, self.pres_log_t, self.pres_n, self.pres_ok = None, -1e9, -1e9, 0, None
@@ -2293,12 +2294,19 @@ class Cam1Monitor:
         if s in self.sessions:
             self.sessions.remove(s)
         t_out = t_out if t_out is not None else s.t_last
+        # Evaluasi gerbang sekali lagi saat sesi ditutup. Ini menangkap kendaraan kuat
+        # yang sempat memenuhi syarat di pembaruan terakhir tetapi belum sempat diumumkan.
+        if (not s.announced and t_out - s.t_in >= self.cfg.entry_seconds
+                and self._confirmed(s) and self._vehicle_ok(s)):
+            self._announce_entry(s)
         if not s.announced:
             self.stats["dibuang"] += 1
             _ph = self._save_photo("_dibuang", s.vid, s.photo_last or s.photo_in)
             log.info("sesi %s dibuang (hanya %.1f dtk, belum dikonfirmasi MASUK) | alasan=%s kelas=%s conf_maks=%.2f deteksi_kuat=%d "
-                     "pusat=(%d,%d) parkir=%s foto=%s", s.vid, t_out - s.t_in, reason, s.cls, s.max_conf, s.strong_hits,
-                     *center(s.bbox), s.parked, _ph or "-")
+                     "pusat=(%d,%d) parkir=%s park_best=%.1f dtk park_total=%.1f dtk foto=%s", s.vid,
+                     t_out - s.t_in, reason, s.cls, s.max_conf, s.strong_hits,
+                     *center(s.bbox), s.parked, s.park_best, s.park_sum,
+                     _ph or "-")
             return
 
         docked = (s.t_dock_in is not None) if len(self.zones.data.get("dock") or []) >= 3 else None
@@ -2939,7 +2947,19 @@ class Cam1Monitor:
             return True
         if s.park_best >= c.park_confirm:
             return True
-        return c.park_total > 0 and s.park_best >= c.park_min_run and s.park_sum >= c.park_total
+        if c.park_total > 0 and s.park_best >= c.park_min_run and s.park_sum >= c.park_total:
+            return True
+        # Kendaraan dengan banyak deteksi kuat yang benar-benar diam tidak perlu menunggu
+        # ambang parkir panjang 30/45 dtk. Tetap wajib melewati min_run agar kendaraan
+        # yang hanya melintas atau kotak sesaat tidak masuk database.
+        if (c.announce_strong > 0 and s.strong_hits >= c.announce_strong
+                and c.park_min_run > 0 and s.park_best >= c.park_min_run):
+            if not s.park_strong_gate_logged:
+                s.park_strong_gate_logged = True
+                log.info("GERBANG-KENDARAAN %s | konfirmasi kuat: deteksi kuat=%d, parkir=%.1f dtk >= min_run=%.1f dtk; ambang penuh=%g dtk dilewati",
+                         s.vid, s.strong_hits, s.park_best, c.park_min_run, c.park_confirm)
+            return True
+        return False
 
     def _vehicle_ok(self, s):
         """Gerbang anti sesi-hantu: kendaraan sejati (a) pernah parkir diam >= park_confirm dtk dan (b) bukan sekadar kotak
