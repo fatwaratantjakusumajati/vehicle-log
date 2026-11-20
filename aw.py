@@ -277,6 +277,13 @@ DIRECTION_MIN_DISPLACEMENT = float(os.environ.get("DIRECTION_MIN_DISPLACEMENT", 
 # Kendaraan yang DIAM saat hilang: KELUAR ditahan PARKED_HOLD_SECONDS dan dibatalkan bila muncul lagi di tempat yang sama (IoU >= SAME_SPOT_MIN_IOU).
 PARKED_HOLD_SECONDS = float(os.environ.get("PARKED_HOLD_SECONDS", "1800"))
 SAME_SPOT_MIN_IOU = float(os.environ.get("SAME_SPOT_MIN_IOU", "0.5"))
+# [CAM2-FRAGMEN] Kotak kecil yang SELURUHNYA berada di dalam kotak mobil parkir (sesi terbuka, atau baru tertutup tapi diam)
+# adalah pecahan mobil itu (atap/bagian terdeteksi sendiri), bukan mobil lain -> JANGAN buka sesi baru (cegah MASUK ganda).
+# Kasus: 19 Nov, sesi ...000005 kotak (219,327,691,453) berada di dalam kotak mobil ...000001 (215,329,912,1077).
+# CAM2_FRAGMENT_GUARD=0 untuk mematikan. Cukup ketat agar mobil tetangga sungguhan tidak ikut terbuang.
+CAM2_FRAGMENT_GUARD = int(os.environ.get("CAM2_FRAGMENT_GUARD", "1"))
+CAM2_FRAGMENT_MIN_CONTAIN = float(os.environ.get("CAM2_FRAGMENT_MIN_CONTAIN", "0.85"))   # bagian kotak baru yang berada di dalam kotak lama
+CAM2_FRAGMENT_MAX_AREA_RATIO = float(os.environ.get("CAM2_FRAGMENT_MAX_AREA_RATIO", "0.5"))  # luas kotak baru <= ini x luas kotak lama
 REVISIT_RETENTION_EFF = max(REVISIT_RETENTION_SECONDS, PARKED_HOLD_SECONDS)
 # [FIX-FOTO-PLAT] foto untuk kamera di PHOTO_PLATE_PRIORITY_CAMS: utamakan crop yang plat-nya terlihat.
 PHOTO_FRONTAL_WEIGHT = float(os.environ.get("PHOTO_FRONTAL_WEIGHT", "1.0"))
@@ -2154,6 +2161,16 @@ class TruckTrackState:
                       f"punya {len(overlap_candidates)} kandidat overlap mirip kuat -- "
                       f"dianggap kendaraan BARU demi keamanan (hindari salah gabung)")
 
+        if CAM2_FRAGMENT_GUARD and self.camera_id == "cam2":
+            _frag_of = self._cam2_fragment_of(bbox, cls, timestamp)
+            if _frag_of is not None:
+                _frg_key = ("FRG", track_id, _frag_of)
+                if _frg_key not in self._stale_relink_logged:
+                    self._stale_relink_logged.add(_frg_key)
+                    print(f"[{self.camera_id}] FRAGMEN-DIABAIKAN: track {track_id} berada di dalam kotak {_frag_of} "
+                          f"(kotak={tuple(int(x) for x in bbox)}) -> pecahan mobil yang sama, tidak dibuat sesi baru")
+                return None, is_new_track, was_relinked, was_return
+
         if self.single_lane_mode:
             open_vehicles = [
                 (v_id, vehicle) for v_id, vehicle in self.vehicles.items()
@@ -2258,6 +2275,30 @@ class TruckTrackState:
 
         vehicle = self._new_vehicle(track_id, timestamp, cls, bbox)
         return vehicle, is_new_track, was_relinked, was_return
+
+    def _cam2_fragment_of(self, bbox, cls, timestamp):
+        """Kembalikan id sesi mobil parkir yang kotaknya MELIPUTI bbox (bbox = pecahan), atau None."""
+        ba = max(1.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+        for v_id, v in self.vehicles.items():
+            if not class_compatible(v.get("final_cls", cls), cls):
+                continue
+            lb = v.get("last_bbox")
+            if not lb:
+                continue
+            if v.get("session_closed"):
+                t_out = v.get("time_out")
+                if t_out is None or not v.get("is_stationary") or timestamp - t_out > PARKED_HOLD_SECONDS:
+                    continue
+            elif timestamp - v.get("last_seen", timestamp) > max(STALE_RELINK_GRACE_SECONDS, STATIONARY_LOST_SECONDS):
+                continue
+            la = max(1.0, (lb[2] - lb[0]) * (lb[3] - lb[1]))
+            if ba > CAM2_FRAGMENT_MAX_AREA_RATIO * la:
+                continue
+            iw = max(0.0, min(lb[2], bbox[2]) - max(lb[0], bbox[0]))
+            ih = max(0.0, min(lb[3], bbox[3]) - max(lb[1], bbox[1]))
+            if (iw * ih) / ba >= CAM2_FRAGMENT_MIN_CONTAIN:
+                return v_id
+        return None
 
     def _new_vehicle(self, track_id, timestamp, cls, bbox):
         vehicle_id = self._new_vehicle_id()
@@ -4547,6 +4588,7 @@ def _camera_loop_body(config, tracks):
                     if diagnostic_boxes.id is not None
                     else [None] * len(diagnostic_boxes)
                 )
+                roi_h, roi_w = roi_frame.shape[:2]
                 detections = []
                 for index, detection_id in enumerate(detection_ids):
                     x1, y1, x2, y2 = diagnostic_boxes.xyxy[index].cpu().tolist()

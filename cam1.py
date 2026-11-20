@@ -178,6 +178,7 @@ class Cfg:
         self.relocate_hits = e("CAM1_RELOCATE_HITS", 2, int)
         self.relocate_window = e("CAM1_RELOCATE_WINDOW", 60.0)
         self.relocate_size_ratio = e("CAM1_RELOCATE_SIZE_RATIO", 8.0)
+        self.relocate_presence_misses = e("CAM1_RELOCATE_PRESENCE_MISSES", 2, int)  # spot lama harus terbukti kosong berulang sebelum sesi dipindah
         self.forklift_max_area = e("CAM1_FORKLIFT_MAX_AREA", 0.06)  # box lebih kecil + oranye = forklift
         self.orange_min_pct = e("CAM1_ORANGE_MIN_PCT", 2.5)
         # [FIX-FORKLIFT-HANTU-2] forklift oranye yang dekat kamera berkotak BESAR, jadi lolos aturan "kotak kecil + oranye" dan terbaca 'Truk'
@@ -420,9 +421,10 @@ class Cfg:
         self.pc_lo = e("CAM1_PC_LO", 0.40)                           # P(bawa) <= ini = kosong
         self.pc_min_run = e("CAM1_PC_MIN_RUN", 2, int)               # status harus bertahan segini skor berturut-turut
         self.pc_move = e("CAM1_PC_MOVE", 0.12)                       # selisih jarak ke kendaraan (x ukuran kendaraan) agar langkah membawa dianggap 'mendekat/menjauh'
+        self.pc_camera_move = e("CAM1_PC_CAMERA_MOVE", 0.035)        # perpindahan minimal (koordinat frame) sepanjang sumbu kendaraan<->stage
         self.pc_near = e("CAM1_PC_NEAR", 0.45)                       # jarak <= ini = di kendaraan
         self.pc_far = e("CAM1_PC_FAR", 0.60)                         # jarak >= ini = di tumpukan/dock
-        self.pc_win = e("CAM1_PC_WIN", 6.0)                          # jendela (dtk) sebelum mulai / sesudah selesai membawa untuk membandingkan posisi
+        self.pc_win = e("CAM1_PC_WIN", 6.0)                          # jendela sebelum/sesudah membawa untuk bukti lintasan stage saja
         self.pc_dist = e("CAM1_PC_DIST", 1, int)                     # [POLA-JARAK] arah dari pola jarak orang ke kendaraan bila skor bawa tak memberi arah; 0 = mati
         self.pcd_min_obs = e("CAM1_PCD_MIN_OBS", 100, int)           # pengamatan orang minimal agar pola dipercaya
         self.pcd_near = e("CAM1_PCD_NEAR", 0.35)                     # jarak (x ukuran kendaraan) <= ini = orang sampai di kendaraan/bak
@@ -436,6 +438,7 @@ class Cfg:
         # [FIX-MARGIN] arah dari orang hanya diputuskan bila selisih suara cukup tegas: |L-U|/(L+U) >= nilai ini. 2 lawan 1 (0.33) = terlalu tipis
         # (kasus 13 Nov 12:12: salah Loading) -> dibiarkan 'Tidak Dapat Dipastikan'. 0 = mati (perilaku lama).
         self.pc_min_agree = e("CAM1_PC_MIN_AGREE", 0.40)           # suara minimal agar arah orang dipakai
+        self.pc_stage_min_sec = e("CAM1_PC_STAGE_MIN_SEC", 30.0)  # fallback arah stage perlu satu aksi Unloading + aktivitas stage berkelanjutan
         # pelabelan otomatis forklift dari sesi bak-terbuka yang yakin (kosong = mati)
         self.fk_autolabel_dir = os.environ.get("CAM1_FK_AUTOLABEL_DIR", "").strip().strip('"')
         self.fk_autolabel_conf = e("CAM1_FK_AUTOLABEL_CONF", 0.80)   # confidence DARI SKOR BAK saja
@@ -469,12 +472,23 @@ def center(b):
     return ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
 
 
+def point_box_dist_norm(point, box):
+    """Jarak titik ke tepi kotak, dinormalisasi dengan sisi terpanjang kotak."""
+    px, py = point
+    dx = max(box[0] - px, 0.0, px - box[2])
+    dy = max(box[1] - py, 0.0, py - box[3])
+    scale = max(1.0, box[2] - box[0], box[3] - box[1])
+    return math.hypot(dx, dy) / scale
+
+
 class Zones:
     """Poligon dalam koordinat normal; di-bind ke ukuran frame saat frame pertama datang."""
 
     def __init__(self, data):
         self.data = {"area": data.get("area") or [], "exclude": data.get("exclude") or [], "dock": data.get("dock") or [],
-                     "stage": data.get("stage") or [], "edge": data.get("edge") or []}
+                     "stage": data.get("stage") or [], "edge": data.get("edge") or [],
+                     # Titik tetap di area pintu tujuan Unloading (koordinat normal 0..1).
+                     "unload_target": data.get("unload_target")}
         self.w = self.h = 0
         self._area = self._excl = self._dock = self._stage = self._edge = None
         self.roi = (0, 0, 1, 1)
@@ -894,22 +908,27 @@ def person_distance_pattern(tracks, cfg):
     return None, "pola jarak: tidak jelas (" + info + ")"
 
 
-def person_direction(tracks, cfg):
-    """[ARAH-ORANG] tracks: list dict(obs=[(t, p_bawa)], dist=[jarak orang ke pusat kendaraan, x ukuran kendaraan], stg=[...]).
+def person_direction(tracks, cfg, camera_axis=None):
+    """[ARAH-ORANG] tracks: list dict(obs=[(t, p_bawa)], dist=[jarak orang ke tepi kendaraan, x ukuran kendaraan], stg=[...]).
     Model 'bawa' baru yakin SETELAH barang terlihat di tangan (sering sudah dekat tujuan), jadi lokasi AMBIL tidak dipercaya
     (selalu bias ke arah salah). Yang dipakai:
-      A) PERJALANAN: arah dari perubahan jarak ke kendaraan; jika orang melintasi poligon stage,
-           arah aliran stage<->kendaraan menjadi acuan yang lebih kuat.
-      B) TARUH: gunakan sisi poligon stage saat orang berhenti membawa; bila zona tidak tersedia,
-           gunakan jarak ke kendaraan sebagai fallback."""
+      A) PERJALANAN: bila sumbu kamera tersedia, vote arah dari proyeksi gerak kaki sepanjang
+           kendaraan<->stage. Jika tidak, gunakan perubahan jarak ke tepi kendaraan. Perlintasan
+           poligon stage menjadi bukti pendukung, bukan vote arah tersendiri.
+      B) Arah diukur di dalam rangkaian deteksi membawa, lalu diringkas dengan median menjadi maksimal
+           satu vote per track. Lokasi saat barang ditaruh hanya bukti pendukung."""
     L = U = 0
-    La = Ua = 0                                  # suara perjalanan (A) saja
-    stage_L = stage_U = 0
+    stage_L = stage_U = 0              # dukungan arah dari perpindahan zona; bukan vote mandiri
+    stage_drop_u = 0
     detail = []
     for ti, tr in enumerate(tracks or []):
         obs, dist, stg = tr.get("obs") or [], tr.get("dist") or [], tr.get("stg") or []
+        pos = tr.get("pos") or []
         if len(dist) != len(obs):
             continue
+        # Banyak rangkaian "bawa" dari orang yang sama bukan bukti independen.
+        # Median perpindahan membuat setiap track memberi paling banyak satu vote.
+        track_deltas = []
 
         def stage_state(start, end, include_end=True):
             if len(stg) != len(obs):
@@ -926,35 +945,41 @@ def person_direction(tracks, cfg):
             if not st:
                 continue
             t0, t1 = obs[i0][0], obs[i1][0]
+            # Arah diukur hanya selama model menyatakan orang sedang membawa barang.
+            # Jendela setelah run bisa menangkap orang yang sudah menaruh barang lalu berjalan pergi.
+            run_dist = dist[i0:i1 + 1]
+            half = max(1, len(run_dist) // 2)
+            d0 = float(median(run_dist[:half]))
+            d1 = float(median(run_dist[-half:]))
+            dd = d1 - d0
+            direction_threshold = cfg.pc_move
+            if camera_axis is not None and len(pos) == len(obs):
+                ax, ay = camera_axis
+                run_proj = [p[0] * ax + p[1] * ay for p in pos[i0:i1 + 1]]
+                if run_proj:
+                    dd = float(median(run_proj[-half:]) - median(run_proj[:half]))
+                    direction_threshold = cfg.pc_camera_move
             pre = [dist[k] for k in range(len(obs)) if t0 - cfg.pc_win <= obs[k][0] < t0]
             post = [dist[k] for k in range(len(obs)) if t1 < obs[k][0] <= t1 + cfg.pc_win]
-            d0 = float(median(pre)) if pre else float(dist[i0])
-            d1 = float(median(post)) if post else float(dist[i1])
-            dd = d1 - d0
             pre_stage = stage_state(t0 - cfg.pc_win, t0, include_end=False)
             post_stage = stage_state(t1, t1 + cfg.pc_win)
-            if pre_stage is not None and post_stage is not None and pre_stage != post_stage:
+            direction_basis = "sumbu kamera" if camera_axis is not None and len(pos) == len(obs) else "jarak kendaraan"
+            if dd <= -direction_threshold:
+                track_deltas.append(dd / direction_threshold)
+                detail.append(f"orang{ti}: bawa t={t0:.0f}-{t1:.0f}, {direction_basis} {dd:+.3f} (kandidat Loading)")
+            elif dd >= direction_threshold:
+                track_deltas.append(dd / direction_threshold)
+                detail.append(f"orang{ti}: bawa t={t0:.0f}-{t1:.0f}, {direction_basis} {dd:+.3f} (kandidat Unloading)")
+            elif pre_stage is not None and post_stage is not None and pre_stage != post_stage:
                 if pre_stage:
-                    L += 1
-                    La += 1
                     stage_L += 1
-                    detail.append(f"orang{ti}: bawa menyeberang stage->kendaraan +Loading")
+                    detail.append(f"orang{ti}: bawa menyeberang stage->kendaraan (pendukung Loading; jarak belum cukup berubah untuk vote)")
                 else:
-                    U += 1
-                    Ua += 1
                     stage_U += 1
-                    detail.append(f"orang{ti}: bawa menyeberang kendaraan->stage +Unloading")
-            elif dd <= -cfg.pc_move:
-                L += 1
-                La += 1
-                detail.append(f"orang{ti}: bawa t={t0:.0f}-{t1:.0f}, posisi {d0:.2f}->{d1:.2f} (mendekat) +Loading")
-            elif dd >= cfg.pc_move:
-                U += 1
-                Ua += 1
-                detail.append(f"orang{ti}: bawa t={t0:.0f}-{t1:.0f}, posisi {d0:.2f}->{d1:.2f} (menjauh) +Unloading")
+                    detail.append(f"orang{ti}: bawa menyeberang kendaraan->stage (pendukung Unloading; jarak belum cukup berubah untuk vote)")
             else:
-                detail.append(f"orang{ti}: bawa t={t0:.0f}-{t1:.0f}, posisi {d0:.2f}->{d1:.2f} (tetap) 0")
-        for r0, r1 in zip(runs, runs[1:]):                           # (B) taruh
+                detail.append(f"orang{ti}: bawa t={t0:.0f}-{t1:.0f}, arah {direction_basis} {dd:+.3f} (gerak belum cukup) 0")
+        for r0, r1 in zip(runs, runs[1:]):                           # (B) catat tempat taruh; jangan gandakan vote perjalanan
             if not (r0[0] and not r1[0]):
                 continue
             seg = dist[r0[2]:r1[1] + 1]
@@ -966,29 +991,39 @@ def person_direction(tracks, cfg):
             at_stage = (sum(bool(v) for v in known_stage) * 2 >= len(known_stage)
                         if known_stage else None)
             if at_stage is True:
-                U += 1
-                stage_U += 1
-                detail.append("orang{}: taruh di zona stage +Unloading".format(ti))
-            elif at_stage is False:
-                L += 1
-                stage_L += 1
-                detail.append("orang{}: taruh di luar zona stage +Loading".format(ti))
+                stage_drop_u += 1
+                detail.append("orang{}: menaruh di zona stage (bukti pendukung Unloading; tidak dihitung sebagai vote kedua)".format(ti))
             elif loc <= cfg.pc_near:
-                L += 1
-                detail.append(f"orang{ti}: taruh di dekat kendaraan (jarak {loc:.2f}) +Loading")
+                detail.append(f"orang{ti}: menaruh dekat kendaraan (jarak {loc:.2f}; pendukung Loading, tanpa vote tambahan)")
             elif loc >= cfg.pc_far:
-                U += 1
-                detail.append(f"orang{ti}: taruh jauh dari kendaraan (jarak {loc:.2f}) +Unloading")
+                detail.append(f"orang{ti}: menaruh jauh dari kendaraan (jarak {loc:.2f}; pendukung Unloading, tanpa vote tambahan)")
             else:
-                detail.append(f"orang{ti}: taruh di jarak {loc:.2f} (ambigu) 0")
+                detail.append(f"orang{ti}: lokasi menaruh di jarak {loc:.2f} (ambigu; tanpa vote tambahan)")
+        if track_deltas:
+            track_delta = float(median(track_deltas))
+            if track_delta <= -1.0:
+                L += 1
+                detail.append(f"orang{ti}: vote track Loading (median skor {track_delta:+.2f}; ambang 1; {len(track_deltas)} rangkaian membawa)")
+            elif track_delta >= 1.0:
+                U += 1
+                detail.append(f"orang{ti}: vote track Unloading (median skor {track_delta:+.2f}; ambang 1; {len(track_deltas)} rangkaian membawa)")
+            else:
+                detail.append(f"orang{ti}: rangkaian membawa saling berlawanan (median skor {track_delta:+.2f}); tanpa vote")
     res = dict(status=None, L=L, U=U, confidence=0.0, review=True, detail=detail,
+               stage_drop_u=stage_drop_u,
                reason=f"orang membawa barang: {L} suara Loading vs {U} Unloading")
     n = L + U
-    if L == U or n < cfg.pc_min_votes:      # [FIX-STAGE-1SAMPEL] suara stage tidak lagi melewati batas suara minimal
+    # Satu lintasan membawa yang jelas + lintasan stage searah boleh memberi label awal,
+    # tetapi tetap wajib review. Lintasan stage sendiri tidak pernah cukup untuk menentukan arah.
+    if L == 1 and U == 0 and stage_L >= 1 and stage_U == 0:
+        res.update(status=LOADING, confidence=0.35, review=True)
+        res["reason"] += f" + {stage_L} lintasan stage->kendaraan searah (perlu review)"
         return res
-    stage_support = stage_L if L > U else stage_U
-    if stage_support == 0 and (La if L > U else Ua) < 1:  # 'taruh' saja tidak cukup: lokasi taruh di dock sama dekatnya dengan di kendaraan
-        res["reason"] += " (ditolak: tidak ada langkah membawa yang mendekat/menjauh searah)"
+    if U == 1 and L == 0 and stage_U >= 1 and stage_L == 0:
+        res.update(status=UNLOADING, confidence=0.35, review=True)
+        res["reason"] += f" + {stage_U} lintasan kendaraan->stage searah (perlu review)"
+        return res
+    if L == U or n < cfg.pc_min_votes:      # bukti stage saja tidak melewati batas suara minimal
         return res
     agree = abs(L - U) / n
     if agree < getattr(cfg, "pc_min_agree", 0.0):       # [FIX-MARGIN] selisih suara terlalu tipis -> jangan menebak
@@ -1762,6 +1797,7 @@ class Session:
         self.ref_thumb, self.ref_t = None, -1e9
         self.pres_prev, self.pres_chain = None, False      # [PRESENSI] acuan cuplikan area kendaraan saat masih terdeteksi
         self.t_present, self.pres_t, self.pres_log_t, self.pres_n, self.pres_ok = None, -1e9, -1e9, 0, None
+        self.pres_miss_n = 0               # cek kosong berturut-turut; satu cek gagal bisa disebabkan occlusion
         self.occl_t0 = None                 # [PRESENSI-TUTUP] awal penutupan area parkir oleh forklift
         self.last_parked_bbox = None
         self.departing = False              # [FIX-PERGI] kotak terakhir sudah kecil & menjauh dari titik parkir
@@ -1819,9 +1855,9 @@ class Cam1Monitor:
                  cfg.review_min, cfg.arrival_prior, cfg.prior_review, cfg.entry_seconds, cfg.settle,
                  ",".join(f"{v:g}" for v in BED_BOX), cfg.person_bed_only, cfg.fk_crop_pad, cfg.fk_llr,
                  cfg.fk_stage, "ADA" if zones.has_stage() else "BELUM digambar")
-        log.info("build cam1: FIX-UKURAN-2(ref=kotak terakhir) PRESENSI FIX-FRAGMEN FIX-PERGI | ratio=%.1f | FIX-PEMILIK-FK nearest=%d | FK-memory=%.0fs | FIX-UMUMKAN strong=%d | moving_grace=%.0f parked_grace=%.0f | frag_ratio=%.2f depart_ratio=%.2f depart_grace=%.0f | dock_min_ratio=%.3f | FIX-PINDAH hits=%d window=%.0f | roi_ext_top=%.2f edge_margin=%.2f edge_park=%.0f | PRESENSI-TUTUP occl=%.0f cover=%.2f | FK-VETO=%d conf>=%.2f | FK-HIJAU>=%.1f%% | SESI-GANDA=%.0f | FOTO-FB=%d | PC-SETELAH-FK=%d | FK-OVL-VETO=%d max=%.2f",
+        log.info("build cam1: FIX-UKURAN-2(ref=kotak terakhir) PRESENSI FIX-FRAGMEN FIX-PERGI | ratio=%.1f | FIX-PEMILIK-FK nearest=%d | FK-memory=%.0fs | FIX-UMUMKAN strong=%d | moving_grace=%.0f parked_grace=%.0f | frag_ratio=%.2f depart_ratio=%.2f depart_grace=%.0f | dock_min_ratio=%.3f | FIX-PINDAH hits=%d window=%.0f miss_presence=%d | roi_ext_top=%.2f edge_margin=%.2f edge_park=%.0f | PRESENSI-TUTUP occl=%.0f cover=%.2f | FK-VETO=%d conf>=%.2f | FK-HIJAU>=%.1f%% | SESI-GANDA=%.0f | FOTO-FB=%d | PC-SETELAH-FK=%d | FK-OVL-VETO=%d max=%.2f",
                  cfg.match_size_ratio, cfg.fk_owner_nearest, cfg.fk_mem_sec, cfg.announce_strong, cfg.moving_grace, cfg.parked_grace,
-                 cfg.frag_ratio, cfg.depart_ratio, cfg.depart_grace, cfg.dock_min_ratio, cfg.relocate_hits, cfg.relocate_window, cfg.roi_ext_top, cfg.edge_margin, cfg.edge_park, cfg.presence_occl, cfg.presence_occl_cover, cfg.fk_veto, cfg.fk_veto_conf, cfg.green_big_pct, cfg.open_guard, cfg.foto_fb, cfg.pc_after_fk, cfg.fk_ovl_veto, cfg.fk_ovl_max)
+                 cfg.frag_ratio, cfg.depart_ratio, cfg.depart_grace, cfg.dock_min_ratio, cfg.relocate_hits, cfg.relocate_window, cfg.relocate_presence_misses, cfg.roi_ext_top, cfg.edge_margin, cfg.edge_park, cfg.presence_occl, cfg.presence_occl_cover, cfg.fk_veto, cfg.fk_veto_conf, cfg.green_big_pct, cfg.open_guard, cfg.foto_fb, cfg.pc_after_fk, cfg.fk_ovl_veto, cfg.fk_ovl_max)
         if cfg.fk_llr <= 0:
             log.warning("CAM1_FK_LLR=%.2f -> bobot arah forklift NOL: gerakan forklift (termasuk lokasi tumpukan) TIDAK ikut menentukan status", cfg.fk_llr)
         if BED_BOX != (0.2, 0.3, 0.95, 0.85):
@@ -2282,25 +2318,59 @@ class Cam1Monitor:
                             f"{o[0] - s.t_in:.0f}:{w_:.3f}:{h_:.3f}" for o, (w_, h_) in zip(_tr["obs"], _tr["wh"])))
                 log.info("ARAH-ORANG-KENDARAAN %s | kotak_norm=(%.3f,%.3f,%.3f,%.3f)", s.vid, s.bbox[0] / max(1, self.zones.w), s.bbox[1] / max(1, self.zones.h),
                          s.bbox[2] / max(1, self.zones.w), s.bbox[3] / max(1, self.zones.h))
-                _pd = person_direction(s.pc_tracks, self.cfg)
+                # Titik pintu/drop-off lebih spesifik daripada centroid stage: pada kamera ini
+                # arah kendaraan->pintu adalah Unloading, arah sebaliknya adalah Loading.
+                camera_axis = None
+                unload_target = self.zones.data.get("unload_target")
+                stage_poly = self.zones.data.get("stage") or []
+                if len(unload_target or []) == 2:
+                    sx, sy = float(unload_target[0]), float(unload_target[1])
+                    target_name = "pintu-unloading"
+                elif len(stage_poly) >= 3:
+                    sx = sum(p[0] for p in stage_poly) / len(stage_poly)
+                    sy = sum(p[1] for p in stage_poly) / len(stage_poly)
+                    target_name = "centroid-stage (fallback)"
+                else:
+                    sx = sy = None
+                    target_name = "tidak tersedia"
+                if sx is not None and self.zones.w > 0 and self.zones.h > 0:
+                    vx = ((s.bbox[0] + s.bbox[2]) / 2.0) / self.zones.w
+                    vy = ((s.bbox[1] + s.bbox[3]) / 2.0) / self.zones.h
+                    ax, ay = sx - vx, sy - vy
+                    alen = math.hypot(ax, ay)
+                    if alen > 1e-6:
+                        camera_axis = (ax / alen, ay / alen)
+                        log.info("ARAH-ORANG-SUMBU %s | target=%s sumbu=(%.3f,%.3f); positif=Unloading",
+                                 s.vid, target_name, *camera_axis)
+                _pd = person_direction(s.pc_tracks, self.cfg, camera_axis=camera_axis)
                 log.info("ARAH-ORANG %s | track=%d skor=%d | %s | status=%s conf=%.2f | %s", s.vid, len(s.pc_tracks),
                          sum(len(tr["obs"]) for tr in s.pc_tracks), _pd["reason"], _pd["status"], _pd["confidence"],
                          "; ".join(_pd["detail"][:12]) or "-")
-                if not _pd["status"] and self.cfg.pc_dist and not s.samples and not any(tr["obs"] for tr in s.fk_tracks):   # hanya bila TIDAK ada sampel bak & TIDAK ada skor forklift sama sekali (dermaga dekat tertutup)
-                    _ds, _dr = person_distance_pattern(s.pc_tracks, self.cfg)
-                    log.info("POLA-JARAK %s | %s", s.vid, _dr)
-                    if _ds:
-                        res["status"] = _ds
-                        res["source"] = "orang_jarak"
-                        res["confidence"] = 0.35
-                        res["review"] = True
-                        res["reason"] = (res.get("reason", "") + "; " if res.get("reason") else "") + _dr + " -> perlu review"
+                if not _pd["status"] and self.cfg.pc_dist and not s.samples and not any(tr["obs"] for tr in s.fk_tracks):   # diagnosis saja; jarak/keberadaan orang tanpa gerakan membawa tidak menentukan arah
+                    _, _dr = person_distance_pattern(s.pc_tracks, self.cfg)
+                    log.info("POLA-JARAK %s | %s (diagnostik saja; bukan vote arah)", s.vid, _dr)
                 if _pd["status"]:
                     res["status"] = _pd["status"]
                     res["source"] = "orang_arah"
                     res["confidence"] = _pd["confidence"]
                     res["review"] = True                      # arah dari orang selalu minta review sampai terbukti akurat
                     res["reason"] = (res.get("reason", "") + "; " if res.get("reason") else "") + _pd["reason"]
+                elif (res.get("status") in (None, UNSURE) and _pd["L"] == 0 and _pd["U"] <= 1
+                      and _pd["stage_drop_u"] >= 1 and s.stg_sec >= self.cfg.pc_stage_min_sec
+                      and s.fk_seconds < self.cfg.fk_near_min):
+                    # Satu track Unloading boleh diperkuat aksi menaruh di stage + aktivitas lama.
+                    # Tanpa vote arah pun fallback tetap memerlukan bukti stage; Loading tidak ditimpa.
+                    res["status"] = UNLOADING
+                    res["source"] = "orang_arah_stage"
+                    res["confidence"] = 0.35
+                    res["review"] = True
+                    _arah_note = (f"{_pd['U']} track memberi arah Unloading" if _pd["U"]
+                                  else "tanpa vote arah perjalanan membawa barang")
+                    res["reason"] = (res.get("reason", "") + "; " if res.get("reason") else "") + (
+                        f"{_arah_note}, {_pd['stage_drop_u']} aksi menaruh di stage, "
+                        f"aktivitas stage {s.stg_sec:.0f} dtk (>= {self.cfg.pc_stage_min_sec:.0f} dtk) "
+                        "-> fallback Unloading; perlu review")
+                    log.info("ARAH-ORANG-STAGE %s | %s", s.vid, res["reason"])
             except Exception as _ex:
                 log.warning("ARAH-ORANG gagal saat tutup sesi: %s", _ex)
         log.info("STAGE-DIAG %s | orang_di_stage=%.0f dtk (maks %d) | status_awal=%s review=%s fk=%.0f dtk", s.vid, s.stg_sec, s.stg_max, res.get("status"), res.get("review"), s.fk_seconds)
@@ -2329,7 +2399,7 @@ class Cam1Monitor:
                 _fa_keep = True
                 log.info("FOTO-AWAL-AKHIR %s | status diisi %s (muatan awal %.2f -> akhir %.2f)", s.vid, _fa, res["early"], res["late"])
         # [TINGKAT-A] bukti arah tidak ada, tapi truk parkir dan ada orang bekerja di stage -> catat sebagai AKTIVITAS (arah tidak ditebak)
-        _lemah = (self.cfg.stage_act_down and not _fa_keep and res.get("review") and res.get("status") in (LOADING, UNLOADING) and res.get("source") not in ("orang_arah", "orang_jarak")
+        _lemah = (self.cfg.stage_act_down and not _fa_keep and res.get("review") and res.get("status") in (LOADING, UNLOADING) and res.get("source") not in ("orang_arah", "orang_arah_stage", "orang_jarak")
                   and s.fk_seconds < self.cfg.fk_near_min)          # tebakan lemah tanpa forklift -> jangan dipertahankan
         if ((res.get("status") in (None, UNSURE) or _lemah) and self.cfg.stage_act_min > 0 and s.stg_sec >= self.cfg.stage_act_min):
             _tebakan = f" (tebakan sistem sebelumnya: {res['status']}, keyakinan {res['confidence']:.2f}, tidak dipakai)" if _lemah else ""
@@ -2524,8 +2594,6 @@ class Cam1Monitor:
         if not c.pc_enable or self.pc_scorer is None:
             return
         near = expand_box(s.bbox, c.pc_box)
-        bx, by = center(s.bbox)
-        bsz = max(1.0, s.bbox[2] - s.bbox[0], s.bbox[3] - s.bbox[1])
         used = set()
         for d in dets:
             if d.cls != 0 or d.conf < c.pc_conf:
@@ -2563,9 +2631,12 @@ class Cam1Monitor:
             if p is None:
                 continue
             tr["obs"].append((now, float(p)))
-            tr["dist"].append(((px - bx) ** 2 + (py - by) ** 2) ** 0.5 / bsz)
-            tr["stg"].append(bool(self.zones.in_stage((d.x1 + d.x2) / 2.0, d.y2)) if self.zones.has_stage() else None)
-            tr["pos"].append((round(px / frame.shape[1], 3), round(py / frame.shape[0], 3)))
+            # Gunakan titik kaki (tengah-bawah box): lebih mewakili lokasi orang di lantai
+            # dan konsisten dengan titik yang dipakai untuk poligon stage.
+            fx, fy = (d.x1 + d.x2) / 2.0, d.y2
+            tr["dist"].append(point_box_dist_norm((fx, fy), s.bbox))
+            tr["stg"].append(bool(self.zones.in_stage(fx, fy)) if self.zones.has_stage() else None)
+            tr["pos"].append((round(fx / frame.shape[1], 3), round(fy / frame.shape[0], 3)))
             tr["wh"].append((round((pb[2] - pb[0]) / frame.shape[1], 3), round((pb[3] - pb[1]) / frame.shape[0], 3)))   # [UKURAN-ORANG] lebar/tinggi kotak orang (data uji: dus di depan badan melebarkan kotak)
             if len(tr["obs"]) > 400:
                 for k in ("obs", "dist", "stg", "pos", "wh"):
@@ -2825,6 +2896,7 @@ class Cam1Monitor:
                     s.ref_thumb, s.ref_t = _th, now
             s.t_present, s.pres_n = None, 0
             s.pres_prev, s.pres_chain = None, False
+            s.pres_miss_n = 0
             cx, cy = center(s.bbox)
             if s.parked and self.zones.in_dock(cx, cy):
                 s.t_dock_in = s.t_dock_in or (s.parked_since or now)
@@ -3175,8 +3247,8 @@ class Cam1Monitor:
             ref = s.last_parked_bbox
             if si in used_s or not s.announced or ref is None or s.departing:
                 continue
-            if c.presence > 0 and not (s.pres_n > 0 and not s.pres_ok):
-                continue                              # tempat parkir lama belum terbukti kosong -> jangan sambung ke benda lain
+            if c.presence > 0 and s.pres_miss_n < c.relocate_presence_misses:
+                continue                              # satu cek gagal bisa karena occlusion; spot lama harus terbukti kosong berulang
             gap = now - s.t_last
             if gap < 2.0 or gap > c.relocate_window:
                 continue
@@ -3212,6 +3284,7 @@ class Cam1Monitor:
                      "pusat (%d,%d) -> (%d,%d)) -> sesi dilanjutkan", s.vid, len(hist), gap, dist, c.handover_dist, *center(ref), *center(bb))
             s.bbox, s.t_last, s.prev_t = bb, now, now
             s.parked, s.parked_since, s.last_parked_bbox = False, None, None
+            s.pres_miss_n = 0
             s.moving_hist.clear()
             s.reloc_hist = []
             s.handovers = getattr(s, "handovers", 0) + 1
@@ -3265,6 +3338,9 @@ class Cam1Monitor:
                 s.occl_t0 = None
         if ok:
             s.t_present = now
+            s.pres_miss_n = 0
+        else:
+            s.pres_miss_n += 1
         if s.pres_n == 0 or ok != s.pres_ok or now - s.pres_log_t >= 60.0:
             s.pres_log_t = now
             if occl_hold:

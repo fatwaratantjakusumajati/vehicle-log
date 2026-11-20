@@ -171,7 +171,8 @@
    0.9651
   ]
  ],
- "_catatan": "Koordinat normal 0..1 terhadap frame penuh. Edit dengan: python cam1.py --draw | 3 Nov 2026: poligon exclude ke-2 (strip kanan atas) dibuang karena truk yang parkir di situ ditolak 'luar_zona'. | 12 Nov 2026 (usulan): exclude ke-2 = terpal hitam saja (pusat kotak di dalam = ditolak). Area & dock TIDAK diubah (jalur pagar tetap di luar area). | 13 Nov 2026: tambah poligon 'edge' (pinggir atas-kanan, tempat truk putih berhenti). Kendaraan yang pusatnya di sini boleh membuka sesi, tetapi baru diumumkan bila parkir diam >= CAM1_EDGE_PARK (10) dtk. area/dock/stage/exclude TIDAK diubah.",
+ "unload_target": [0.96, 0.74],
+ "_catatan": "Koordinat normal 0..1 terhadap frame penuh. Edit dengan: python cam1.py --draw | 3 Nov 2026: poligon exclude ke-2 (strip kanan atas) dibuang karena truk yang parkir di situ ditolak 'luar_zona'. | 12 Nov 2026 (usulan): exclude ke-2 = terpal hitam saja (pusat kotak di dalam = ditolak). Area & dock TIDAK diubah (jalur pagar tetap di luar area). | 13 Nov 2026: tambah poligon 'edge' (pinggir atas-kanan, tempat truk putih berhenti). Kendaraan yang pusatnya di sini boleh membuka sesi, tetapi baru diumumkan bila parkir diam >= CAM1_EDGE_PARK (10) dtk. area/dock/stage/exclude TIDAK diubah. unload_target menunjuk area pintu pada panah merah; gerak menuju titik ini saat membawa barang = Unloading.",
  "edge": [
   [
    0.3,

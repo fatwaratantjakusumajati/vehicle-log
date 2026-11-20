@@ -11,10 +11,11 @@ Sistem pemantauan lalu lintas kendaraan dan aktivitas bongkar-muat (*loading / u
   * Dijalankan oleh `cam1.py`.
   * Pelacakan berbasis keberadaan sesi kendaraan (*presence session tracking*) di area dock tanpa ketergantungan pada track ID yang rapuh.
   * Estimasi status muatan (*Loaded / Empty / Closed / Forklift*) menggunakan crop bak kendaraan dan embedding MobileNetV2.
-  * Deteksi arah bongkar-muat (*Loading vs Unloading*) berbasis fusi bukti log-odds:
-    * Analisis tren skor muatan bak (tiba vs berangkat).
-    * Gerakan & status muatan forklift (*carrying cargo vs empty forks*).
-    * Status aktivitas orang yang membawa barang.
+  * Estimasi arah bongkar-muat menggabungkan perubahan muatan bak, gerak forklift, dan gerak orang yang membawa barang.
+  * Untuk arah dari orang, posisi kaki diproyeksikan pada sumbu kendaraan menuju titik `unload_target` di `cam1_zones.json`:
+    * Gerak menuju titik pintu Unloading = Unloading.
+    * Gerak menjauhi titik pintu menuju kendaraan = Loading.
+    * Gerak kecil/menyamping menghasilkan `Tidak Dapat Dipastikan` atau hasil berstatus review.
   * Pencegahan *false positive* terhadap forklift oranye (Heli) dan kendaraan tumpang-tindih.
 * **CAM 2 (Halaman Depan / Gate Kendaraan):**
   * Dijalankan oleh pipeline `aw.py`.
@@ -49,7 +50,9 @@ Sistem pemantauan lalu lintas kendaraan dan aktivitas bongkar-muat (*loading / u
 │   ├── roi.py                         # Tool interaktif penentuan zona poligon via RTSP
 │   ├── train_classifier.py            # Script pelatihan classifier muatan
 │   ├── train_fk_carry.py              # Script pelatihan classifier status forklift
-│   ├── train_carry.py                 # Script pelatihan classifier status orang
+│   ├── train_carry.py                 # Script pelatihan model carry lama
+│   ├── train_person_cls.py            # Fine-tune classifier orang bawa/kosong
+│   ├── export_openvino.py             # Ekspor dan bandingkan model person carry
 │   ├── label_crops.py                 # Tool GUI pelabelan gambar crop
 │   └── README.md                      # Panduan penggunaan tool training
 └── README.md                          # Dokumentasi proyek
@@ -120,6 +123,22 @@ python cam1.py --video path/ke/rekaman.mp4 --no-send
 python cam1.py --preview --image frame.jpg
 ```
 
+### 4. Model dan Data Training
+Bobot model, video, crop, dataset, cache, dan hasil training tidak disimpan di GitHub. Siapkan model yang diperlukan secara lokal sesuai konfigurasi `.env` (`MODEL_PATH`, `CAM1_FK_MODEL`, dan model classifier).
+
+Untuk melatih ulang classifier orang:
+
+```bash
+python training_tools/label_crops.py --src person_crops --out dataset_raw
+python training_tools/train_person_cls.py --raw dataset_raw --epochs 80 --device cpu
+python training_tools/export_openvino.py
+```
+
+Script training membagi data berdasarkan sesi video agar crop dari sesi yang sama tidak tersebar ke data train dan validasi. Tinjau laporan evaluasi dan kesalahan klasifikasi sebelum memakai bobot baru. Dataset `dataset_raw/` dan hasil kerja `dataset_cls/` tetap lokal dan sudah diabaikan oleh Git.
+
+### 5. Zona CAM 1
+`cam1_zones.json` memakai koordinat normal 0–1 terhadap ukuran frame. Sesuaikan poligon `area`, `dock`, dan `stage` dengan kamera. `unload_target` adalah titik pada area tujuan Unloading; gerak orang yang membawa barang menuju titik tersebut dihitung sebagai Unloading. Kalibrasi titik ini untuk sudut kamera masing-masing.
+
 ### 3. Kalibrasi Zona Poligon (ROI)
 Gunakan tool interaktif di folder `training_tools/` untuk menggambar poligon area pantau:
 
@@ -130,7 +149,4 @@ python training_tools/roi.py rtsp://user:password@<ip-kamera>:554/stream
 ---
 
 ## 🔒 Privasi & Keamanan Data
-Repositori ini dikonfigurasi dengan aturan pengabaian file ketat (`.gitignore`):
-* Kredensial otentikasi RTSP, alamat IP, dan token n8n diisolasi dalam file `.env`.
-* Bobot model berukuran besar (`*.pkl`, `*.pt`, `*_openvino_model/`) dan rekaman video/dataset tidak diikutsertakan ke dalam version control.
-* Log harian dan bukti foto tangkapan disimpan secara lokal pada folder `logs/` dan `evidence_cam1/`.
+Repositori ini mengabaikan file `.env`, bobot model (`*.pkl`, `*.pt`, `*_openvino_model/`), virtual environment, video, crop, dataset (`dataset_raw/`, `dataset_cls/`), cache, log, dan hasil inferensi. Gunakan `.env.example` sebagai template; jangan commit kredensial kamera atau webhook.

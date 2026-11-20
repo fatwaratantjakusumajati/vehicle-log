@@ -46,6 +46,12 @@ box/
 runs/
 ForkliftProject.v1i.yolov11/
 dataset_gabungan/
+dataset_raw/
+dataset_cls/
+*.cache
+runs_person/
+kesalahan/
+kesalahan.jpg
 cek_deteksi_hasil.jpg
 zones_preview.jpg
 frame*.jpg
