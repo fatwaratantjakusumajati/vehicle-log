@@ -2,6 +2,8 @@
 # Prioritas: model fine-tune person_carry_cls.pt (YOLO11-cls). Bila tidak ada, jatuh ke model lama person_carry_model.pkl.
 import os
 import pickle
+import cv2
+import numpy as np
 
 # Urutan: PERSON_CARRY_CLS_PATH (bila diisi) -> folder OpenVINO person_carry_cls_openvino_model -> person_carry_cls.pt
 _OV_DIR = "person_carry_cls_openvino_model"
@@ -20,7 +22,6 @@ _cls_idx = None
 _cls_tried = False
 _bundle = None
 _bundle_tried = False
-
 
 def _load_cls():
     global _cls, _cls_idx, _cls_tried

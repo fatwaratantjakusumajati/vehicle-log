@@ -106,7 +106,7 @@ N8N_RETRY_DELAY_SECONDS = env("N8N_RETRY_DELAY_SECONDS", float, required=False) 
 N8N_OUTBOX_PATH = env("N8N_OUTBOX_PATH", required=False) or "n8n_outbox.jsonl"
 N8N_OUTBOX_MAX_MB = env("N8N_OUTBOX_MAX_MB", float, required=False) or 500.0
 N8N_OUTBOX_INTERVAL_SECONDS = env("N8N_OUTBOX_INTERVAL_SECONDS", float, required=False) or 30.0
-N8N_OUTBOX_MAX_TRIES = env("N8N_OUTBOX_MAX_TRIES", int, required=False) or 20
+N8N_OUTBOX_MAX_TRIES = env("N8N_OUTBOX_MAX_TRIES", int, required=False) or 300
 MODEL_PATH = env("MODEL_PATH")
 
 CAM1_MODEL_PATH = env("CAM1_MODEL_PATH", required=False) or MODEL_PATH
@@ -284,6 +284,12 @@ SAME_SPOT_MIN_IOU = float(os.environ.get("SAME_SPOT_MIN_IOU", "0.5"))
 CAM2_FRAGMENT_GUARD = int(os.environ.get("CAM2_FRAGMENT_GUARD", "1"))
 CAM2_FRAGMENT_MIN_CONTAIN = float(os.environ.get("CAM2_FRAGMENT_MIN_CONTAIN", "0.85"))   # bagian kotak baru yang berada di dalam kotak lama
 CAM2_FRAGMENT_MAX_AREA_RATIO = float(os.environ.get("CAM2_FRAGMENT_MAX_AREA_RATIO", "0.5"))  # luas kotak baru <= ini x luas kotak lama
+# [CAM2-REOPEN] track yang SAMA masih terlihat terus-menerus padahal sesinya sudah 'ditutup' (deteksi sempat berkedip > 30 dtk) = mobil
+# parkir itu belum pergi -> buka lagi sesinya (tanpa MASUK baru) selama SIKLUS_SELESAI belum terkirim. 0 = mati.
+CAM2_REOPEN = int(os.environ.get("CAM2_REOPEN", "1"))
+CAM2_RESUME_SAMESPOT = int(os.environ.get("CAM2_RESUME_SAMESPOT", "1"))  # sesi parkir hanya boleh disambung oleh track di tempat yang sama
+CAM2_REOPEN_CONFIRM_SECONDS = float(os.environ.get("CAM2_REOPEN_CONFIRM_SECONDS", "6"))   # terlihat terus selama ini baru dibuka lagi
+CAM2_REOPEN_MAX_GAP_SECONDS = float(os.environ.get("CAM2_REOPEN_MAX_GAP_SECONDS", "3"))   # jeda antar deteksi yang masih dianggap 'terus terlihat'
 REVISIT_RETENTION_EFF = max(REVISIT_RETENTION_SECONDS, PARKED_HOLD_SECONDS)
 # [FIX-FOTO-PLAT] foto untuk kamera di PHOTO_PLATE_PRIORITY_CAMS: utamakan crop yang plat-nya terlihat.
 PHOTO_FRONTAL_WEIGHT = float(os.environ.get("PHOTO_FRONTAL_WEIGHT", "1.0"))
@@ -1782,6 +1788,8 @@ class TruckTrackState:
 
         if track_id in self.track_to_vehicle:
             v_id = self.track_to_vehicle[track_id]
+            if CAM2_REOPEN and self.camera_id == "cam2":
+                self._cam2_reopen_if_visible(track_id, v_id, timestamp)
             return self.vehicles.get(v_id), is_new_track, was_relinked, was_return
 
         def has_other_visible_track(vehicle):
@@ -2006,6 +2014,21 @@ class TruckTrackState:
             if not class_compatible(vehicle.get("final_cls", cls), cls):
                 continue
 
+            # [FIX-RESUME-SAMESPOT] mobil yang DIAM/parkir tidak "pindah"; track baru yang jauh dari kotaknya
+            # (mis. bayangan/deteksi hantu) TIDAK boleh menyambung sesi ini, kalau tidak posisi sesi ikut
+            # tergeser dan mobil aslinya nanti ditolak lalu dibuat sesi baru (duplikat).
+            if CAM2_RESUME_SAMESPOT and vehicle.get("is_stationary") and not _same_spot_parked:
+                _lw, _lh = bbox_size(last_box); _nw, _nh = bbox_size(bbox)
+                _lcx, _lcy = bbox_center(last_box); _ncx, _ncy = bbox_center(bbox)
+                _shift = math.hypot(_ncx - _lcx, _ncy - _lcy) / max(_lw, _lh, _nw, _nh, 1.0)
+                if _shift > (STATIONARY_RELINK_MAX_SHIFT_RATIO or 0.5):
+                    _ss_key = ("SS", track_id, v_id)
+                    if _ss_key not in self._stale_relink_logged:
+                        self._stale_relink_logged.add(_ss_key)
+                        print(f"[{self.camera_id}] RESUME DITOLAK (beda tempat): {v_id} parkir, track {track_id} "
+                              f"bergeser {_shift:.2f}x ukuran dari kotaknya -- bukan mobil yang sama")
+                    continue
+
             sim = vehicle_appearance_similarity(vehicle)
 
             if (sim is None and not _same_spot_parked) or \
@@ -2169,6 +2192,9 @@ class TruckTrackState:
                     self._stale_relink_logged.add(_frg_key)
                     print(f"[{self.camera_id}] FRAGMEN-DIABAIKAN: track {track_id} berada di dalam kotak {_frag_of} "
                           f"(kotak={tuple(int(x) for x in bbox)}) -> pecahan mobil yang sama, tidak dibuat sesi baru")
+                _fv = self.vehicles.get(_frag_of)
+                if _fv is not None and _fv.get("session_closed"):
+                    self._cam2_extend_closed(_fv, _frag_of, timestamp)   # mobil masih ada: tunda SIKLUS_SELESAI, jangan buat MASUK baru nanti
                 return None, is_new_track, was_relinked, was_return
 
         if self.single_lane_mode:
@@ -2275,6 +2301,48 @@ class TruckTrackState:
 
         vehicle = self._new_vehicle(track_id, timestamp, cls, bbox)
         return vehicle, is_new_track, was_relinked, was_return
+
+    def _cam2_reopen_if_visible(self, track_id, v_id, timestamp):
+        """Track yang terhubung ke sesi 'ditutup' tetapi terus terlihat >= CAM2_REOPEN_CONFIRM_SECONDS: sesi dibuka lagi.
+        Hanya selama SIKLUS_SELESAI belum terkirim (masih di pending_exits), supaya tidak ada event ganda."""
+        v = self.vehicles.get(v_id)
+        if v is None or not v.get("session_closed") or v_id not in self.pending_exits:
+            return False
+        last = v.get("_reopen_last")
+        if v.get("_reopen_t0") is None or last is None or timestamp - last > CAM2_REOPEN_MAX_GAP_SECONDS:
+            v["_reopen_t0"] = timestamp
+        v["_reopen_last"] = timestamp
+        if timestamp - v["_reopen_t0"] < CAM2_REOPEN_CONFIRM_SECONDS:
+            return False
+        print(f"[{self.camera_id}] REOPEN: {v_id} masih terlihat terus ({timestamp - v['_reopen_t0']:.0f}s lewat track {track_id}) "
+              f"padahal sesi sudah ditutup -- sesi dibuka lagi, MASUK TIDAK dihitung ulang")
+        v["session_closed"] = False
+        v["time_out"] = None
+        v["_reopen_t0"] = None
+        v["_reopen_last"] = None
+        v["last_seen"] = timestamp
+        return True
+
+    def _cam2_extend_closed(self, v, v_id, timestamp):
+        """Mobil parkir yang sesinya sudah 'ditutup' ternyata MASIH terlihat (hanya sebagai pecahan): geser waktu keluar
+        & tahan SIKLUS_SELESAI terus selama masih terlihat. Tanpa ini, setelah masa tahan habis sesi dikirim selesai lalu
+        mobil yang sama dibuat MASUK baru (duplikat tiap ~30 menit)."""
+        if timestamp - (v.get("_ext_t") or 0.0) < 5.0:
+            return
+        v["_ext_t"] = timestamp
+        v["time_out"] = timestamp
+        pend = self.pending_exits.get(v_id)
+        if not pend:
+            return
+        pend["close_timestamp"] = timestamp
+        p = pend.get("payload") or {}
+        p["timestamp_keluar"] = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        t_masuk = v.get("first_seen") or v.get("time_in")
+        if t_masuk:
+            d = round(max(0.0, timestamp - t_masuk), 2)
+            v["duration_seconds"] = d
+            p["durasi_detik"] = d
+            p["durasi_menit"] = round(d / 60.0, 2)
 
     def _cam2_fragment_of(self, bbox, cls, timestamp):
         """Kembalikan id sesi mobil parkir yang kotaknya MELIPUTI bbox (bbox = pecahan), atau None."""
